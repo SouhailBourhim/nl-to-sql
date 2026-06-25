@@ -1,0 +1,7 @@
+.claude/
+.env
+__pycache__/
+*.pyc
+.DS_Store
+streamlit.log
+spider_data/
