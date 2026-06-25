@@ -31,6 +31,8 @@ It is **not** perfectly accurate — it's a quantized 7B model running on CPU. I
 ## Setup
 
 ```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 
 # Install Ollama (https://ollama.com), then pull the model once:
@@ -50,15 +52,33 @@ DATABASE_URL=sqlite:///path/to/file.sqlite
 DATABASE_URL=postgresql+psycopg2://user:password@host:5432/dbname
 ```
 
+### Sample Postgres database
+
+A disposable Postgres instance plus a sample `customers`/`plans`/`recharges` schema (matching the churn-analysis example above) is included for local testing:
+
+```bash
+docker run -d --name nl_to_sql_pg \
+  -e POSTGRES_USER=nltosql -e POSTGRES_PASSWORD=nltosql -e POSTGRES_DB=nltosql \
+  -p 5432:5432 postgres:16
+
+# set DATABASE_URL=postgresql+psycopg2://nltosql:nltosql@localhost:5432/nltosql in .env, then:
+PYTHONPATH=. python scripts/seed_db.py
+```
+
+See [`scripts/seed_db.py`](scripts/seed_db.py) for the schema definition and synthetic data generation.
+
 ## Run
+
+Always activate the venv first: `source venv/bin/activate`.
 
 ```bash
 streamlit run app.py
 ```
 
-Or run the pipeline directly without the UI:
+Or run the pipeline directly without the UI (note `PYTHONPATH=.` so the top-level packages resolve when running a script from a subdirectory):
 
-```python
+```bash
+PYTHONPATH=. python - <<'EOF'
 from db.schema_introspect import get_schema_text
 from llm.ollama_backend import OllamaBackend
 from pipeline.retry import generate_and_execute
@@ -67,6 +87,7 @@ schema = get_schema_text()
 backend = OllamaBackend()
 outcome = generate_and_execute(backend, "Which breed has the most dogs?", schema)
 print(outcome)
+EOF
 ```
 
 ## Safety
@@ -93,5 +114,13 @@ pipeline/
   executor.py                 # runs SQL, returns rows or a structured error
   retry.py                    # error-correction loop
   explainer.py                 # result → natural-language answer
+scripts/
+  seed_db.py                   # creates and seeds the sample Postgres schema
 app.py                         # Streamlit UI
 ```
+
+## Known limitations
+
+`sqlcoder` running locally (quantized, CPU/shared-GPU) is not perfectly reliable: it can pick wrong columns on ambiguous questions, occasionally writes a `GROUP BY` that's invalid under Postgres's strict SQL standard enforcement (even though the same query is accepted by SQLite's looser rules), and its explanation step sometimes echoes a SQL fragment instead of a sentence since it's fine-tuned for SQL generation, not prose. The retry loop and read-only safety check exist to make these failures *safe* (no crash, no destructive query, no silently wrong-looking success) rather than to eliminate them.
+
+For the full build narrative, including every bug found and how it was diagnosed, see [BUILD_LOG.md](BUILD_LOG.md).

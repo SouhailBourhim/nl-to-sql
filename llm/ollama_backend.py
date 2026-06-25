@@ -35,7 +35,11 @@ class OllamaBackend(LLMBackend):
                 # chance to land on a different, hopefully correct, output.
                 "options": {"temperature": 0.3},
             },
-            timeout=120,
+            # A 7B model on a shared CPU/GPU machine (especially with other
+            # services like Postgres/Docker running) can occasionally take
+            # well over a minute; 120s clipped real, successful generations
+            # in testing under load, so this leaves more margin.
+            timeout=240,
         )
         response.raise_for_status()
         return response.json()["response"]
