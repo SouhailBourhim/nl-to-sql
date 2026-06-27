@@ -6,3 +6,5 @@ __pycache__/
 streamlit.log
 spider_data/
 venv/
+.pytest_cache/
+eval_report*.json

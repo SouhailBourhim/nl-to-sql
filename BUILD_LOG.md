@@ -129,10 +129,41 @@ Also added `tests/test_safety.py` — the first real test file in the project (p
 
 Re-ran the full pipeline against the real Postgres DB after these changes to confirm the happy path still works unaffected — it does.
 
+## 12. Offline integration test suite
+
+Addressed the "no automated evaluation harness" / "tests depend on live infra" gap identified earlier. Rather than building the Spider-benchmark harness (a bigger, separate undertaking -- still open below), focused on a more immediately useful gap: there was no way to test the pipeline's control flow (retry behavior, safety enforcement, explainer wiring) without a live model and a running Postgres container.
+
+- `tests/conftest.py`: sets `DATABASE_URL` to a throwaway SQLite file *before* `config.py` (or anything importing it) is loaded anywhere in the test session, then creates and seeds a small schema in a session-scoped fixture. The ordering matters -- `config.DATABASE_URL` and `db/connection.py`'s `engine` are both bound once at import time, so the env var has to be set first or the test suite would silently hit whatever `.env` points at (the real Postgres DB).
+- `tests/fakes.py`: `FakeLLMBackend`, a canned-response `LLMBackend` implementation. Takes a list of SQL strings (one per retry attempt) and a canned explanation, and records every call it receives -- enough to script scenarios like "wrong query on attempt 1, corrected query on attempt 2" and assert the retry loop actually retried rather than just inspecting final output.
+- `tests/test_pipeline_integration.py`: 6 tests covering the full `generate_and_execute` flow -- first-attempt success, retry-then-succeed, exhausting all retries, a destructive query being blocked outright (never even reaching a retry), the explainer being wired correctly, and `execute_sql` rejecting a hallucinated table.
+- `pytest.ini`: added `pythonpath = .` so `pytest` works directly without manually exporting `PYTHONPATH=.` first.
+
+Verified the independence claim directly: stopped the Postgres container (`docker stop nl_to_sql_pg`) and reran the full suite -- all 17 tests (11 from `test_safety.py` + 6 new ones) still passed in under 0.05s, then restarted the container.
+
+## 13. Spider benchmark accuracy harness
+
+Built `scripts/evaluate_spider.py` to close the remaining testing gap: the offline test suite (section 12) covers pipeline *control flow* with a fake backend, not real-model *accuracy*. This script runs actual Spider questions through the live pipeline (whichever `LLM_BACKEND` is configured) against the matching Spider SQLite database, and compares the result rows to Spider's gold SQL run on the same database. Execution accuracy (does the data match), not exact-string match, since two different SQL queries can be equally correct.
+
+Same `DATABASE_URL`-before-any-import ordering trick as `tests/conftest.py` is used here too, pointed at `spider_data/database/<db>/<db>.sqlite` instead of a throwaway fixture. The row-comparison is a simplification of Spider's official metric (sorts each row's own values, then sorts the row list -- order- and column-position-insensitive, but not as rigorous as the official column-permutation handling); good enough for a learning-project sanity check, not a publishable benchmark number.
+
+### Bug found while running it: a live rate limit crashed the whole evaluation run
+
+Running against 20 `dog_kennels` questions back-to-back hit NVIDIA's free-tier rate limit (`429 Too Many Requests`) partway through, and the entire script crashed rather than just failing that one question. Tracing why surfaced a real gap, not just an eval-script inconvenience: `pipeline/retry.py`'s loop only ever caught *SQL execution* errors (`ExecutionError` from `execute_sql`) -- if `backend.generate_sql` itself raised (network error, rate limit, malformed API response), the exception propagated straight up and would have crashed the Streamlit app the same way in production, not just this script.
+
+Fixed at two levels:
+- `pipeline/retry.py`: wrapped the `backend.generate_sql` call in `try/except`, treating any exception as a retryable failure (same as a bad-SQL execution error) rather than letting it crash the request.
+- `llm/api_backend.py`: added transport-level retry-with-backoff specifically for `429` responses inside `_chat` (respects `Retry-After` if present, otherwise a short fixed backoff, capped at 3 retries). This is handled separately from the pipeline-level retry because a rate limit is a transient *infrastructure* issue, not the model producing bad SQL -- retrying transparently at the transport layer means it doesn't burn one of the limited logical attempts that `MAX_ATTEMPTS` budgets for actual SQL-correction retries.
+
+Added `tests/test_api_backend.py` (mocks `requests.post`, no real network call) verifying the 429-retry-then-succeed path, the exhausted-retries path, and that a non-429 error (e.g. 500) is *not* retried. Added two more cases to `tests/test_pipeline_integration.py` using a `FakeLLMBackend` extended with a `raise_on_attempts` parameter, confirming the pipeline recovers from a mid-sequence backend exception and fails cleanly (not with a crash) if the backend always raises.
+
+### Result
+
+Reran the harness after the fix: 15 `dog_kennels` questions completed without crashing, **11/15 (73.3%) execution-accuracy match**, 2 genuine generation failures, 2 genuine mismatches. This is the first repeatable, scriptable accuracy number for the project -- everything before this was spot-checking a handful of hand-picked questions.
+
 ## Open items / known limitations (not yet fixed)
 
 - Explainer step occasionally returns a SQL fragment instead of a sentence when using the `sqlcoder`/Ollama backend (sqlcoder is not a prose model). Not observed with the `api` backend in testing so far.
 - The `sqlcoder`/Ollama backend cannot always self-correct Postgres's stricter `GROUP BY` enforcement even when given the exact error; the `api` backend resolved the same question correctly without needing a retry.
 - UI has not been manually click-tested in a real browser session.
-- No automated evaluation harness yet (Spider dataset is present on disk but unused for this).
+- The Spider harness's row-comparison metric is a simplification of the official Spider execution-accuracy metric, not a byte-for-byte reproduction -- don't quote its accuracy numbers as directly comparable to published Spider leaderboard results.
 - The NVIDIA `API_MODEL` default (`meta/llama-3.1-70b-instruct`) was chosen as an educated guess and only spot-checked with a couple of questions — not yet run through a broader test set.
