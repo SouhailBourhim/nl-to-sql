@@ -2,13 +2,19 @@
 
 Ask a plain-English question about a database, get back a SQL query, the actual query result, and a natural-language answer.
 
-```
-"Which breed has the most dogs?"
-        ↓
-  schema introspection → LLM generates SQL → safety check → execute → explain result
+```mermaid
+flowchart LR
+    Q(["💬 'Which breed has<br/>the most dogs?'"]) --> S["1 · Schema introspection"]
+    S --> G["2 · LLM generates SQL"]
+    G --> C{"3 · Safety check"}
+    C -- blocked --> X(["❌ Rejected"])
+    C -- passes --> E["4 · Execute SQL"]
+    E -- error --> G
+    E -- success --> O["5 · Explain result"]
+    O --> A(["✅ Plain-English answer"])
 ```
 
-This is a learning project built layer by layer, with each layer testable in isolation.
+This is a learning project built layer by layer, with each layer testable in isolation. The `4 → 2` loop is the retry path: a failed execution feeds its error back into the next generation attempt (see [Reliability tuning](#reliability-tuning)).
 
 ## Architecture
 
@@ -135,36 +141,45 @@ The match check is execution accuracy with a simplification: each row's values a
 ## Project structure
 
 ```
-config.py                  # env var loading
-db/
-  connection.py             # SQLAlchemy engine
-  schema_introspect.py      # Layer 2: schema → text
-llm/
-  base.py                   # LLMBackend interface
-  factory.py                 # picks a backend based on LLM_BACKEND in .env
-  ollama_backend.py          # local sqlcoder via Ollama
-  api_backend.py              # hosted OpenAI-compatible chat API (default: NVIDIA)
-  extract.py                  # shared SQL-cleanup helper for both backends
-pipeline/
-  prompt_templates.py        # prompt construction
-  safety.py                  # read-only query validation
-  executor.py                 # runs SQL, returns rows or a structured error
-  retry.py                    # error-correction loop
-  explainer.py                 # result → natural-language answer
-scripts/
-  seed_db.py                   # creates and seeds the sample Postgres schema
-  evaluate_spider.py            # real-model accuracy check against Spider benchmark
-tests/
-  conftest.py                   # throwaway SQLite fixture for offline tests
-  fakes.py                       # FakeLLMBackend, a canned-response LLMBackend
-  test_safety.py                  # unit tests for pipeline/safety.py
-  test_pipeline_integration.py     # full pipeline flow against the fixture DB
-  test_api_backend.py              # rate-limit retry logic (mocked HTTP)
-app.py                         # Streamlit UI
+.
+├── app.py                              Streamlit UI
+├── config.py                           env var loading
+│
+├── db/
+│   ├── connection.py                   SQLAlchemy engine
+│   └── schema_introspect.py            Layer 2: schema → text
+│
+├── llm/
+│   ├── base.py                         LLMBackend interface
+│   ├── factory.py                      picks a backend based on LLM_BACKEND in .env
+│   ├── ollama_backend.py               local sqlcoder via Ollama
+│   ├── api_backend.py                  hosted OpenAI-compatible chat API (default: NVIDIA)
+│   └── extract.py                      shared SQL-cleanup helper for both backends
+│
+├── pipeline/
+│   ├── prompt_templates.py             prompt construction
+│   ├── safety.py                       read-only + known-table validation
+│   ├── executor.py                     runs SQL, returns rows or a structured error
+│   ├── retry.py                        error-correction loop
+│   └── explainer.py                    result → natural-language answer
+│
+├── scripts/
+│   ├── seed_db.py                      creates and seeds the sample Postgres schema
+│   └── evaluate_spider.py              real-model accuracy check against Spider benchmark
+│
+└── tests/
+    ├── conftest.py                     throwaway SQLite fixture for offline tests
+    ├── fakes.py                        FakeLLMBackend, a canned-response LLMBackend
+    ├── test_safety.py                  unit tests for pipeline/safety.py
+    ├── test_pipeline_integration.py    full pipeline flow against the fixture DB
+    └── test_api_backend.py             rate-limit retry logic (mocked HTTP)
 ```
 
 ## Known limitations
 
-`sqlcoder` running locally (quantized, CPU/shared-GPU) is not perfectly reliable: it can pick wrong columns on ambiguous questions, occasionally writes a `GROUP BY` that's invalid under Postgres's strict SQL standard enforcement (even though the same query is accepted by SQLite's looser rules), and its explanation step sometimes echoes a SQL fragment instead of a sentence since it's fine-tuned for SQL generation, not prose. The retry loop and read-only safety check exist to make these failures *safe* (no crash, no destructive query, no silently wrong-looking success) rather than to eliminate them.
+- **`ollama`/`sqlcoder` accuracy** — a quantized 7B model running on CPU/shared-GPU is not perfectly reliable: it can pick wrong columns on ambiguous questions, occasionally writes a `GROUP BY` that's invalid under Postgres's strict SQL standard enforcement (even though the same query is accepted by SQLite's looser rules), and its explanation step sometimes echoes a SQL fragment instead of a sentence since it's fine-tuned for SQL generation, not prose. The retry loop and safety checks exist to make these failures *safe* (no crash, no destructive query, no silently wrong-looking success), not to eliminate them.
+- **NVIDIA model choice** — `API_MODEL`'s default (`meta/llama-3.1-70b-instruct`) was an educated guess, only spot-checked and run through the Spider harness on a small sample. Not validated at scale.
+- **Eval metric is a simplification** — `scripts/evaluate_spider.py`'s execution-accuracy check is order/column-position-insensitive but not as rigorous as Spider's official metric. Treat its output as a sanity check, not a leaderboard-comparable number.
+- **UI not manually browser-tested** in this build process — `streamlit run app.py` has been confirmed to serve correctly, but the actual click-through experience hasn't been verified end-to-end.
 
 For the full build narrative, including every bug found and how it was diagnosed, see [BUILD_LOG.md](BUILD_LOG.md).
