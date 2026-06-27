@@ -20,13 +20,16 @@ This is a learning project built layer by layer, with each layer testable in iso
 | 4. Execution | Validates the SQL is read-only, runs it, retries with the error fed back to the LLM if it fails | `pipeline/safety.py`, `pipeline/executor.py`, `pipeline/retry.py` |
 | 5. Output | Turns the result rows into a one/two-sentence plain-language answer | `pipeline/explainer.py` |
 
-The LLM call goes through an abstract `LLMBackend` interface (`llm/base.py`), so the model behind it can be swapped without touching the pipeline.
+The LLM call goes through an abstract `LLMBackend` interface (`llm/base.py`), so the model behind it can be swapped via one config value (`LLM_BACKEND` in `.env`) without touching the pipeline. `llm/factory.py` picks the implementation at runtime.
 
-## Why a local model?
+## Two LLM backends
 
-The default backend (`llm/ollama_backend.py`) runs [`sqlcoder`](https://github.com/defog-ai/sqlcoder) locally via [Ollama](https://ollama.com) — free, private (no data leaves your machine), and reasonably close to the original `defog/sqlcoder-7b` choice without needing a GPU or a paid hosted endpoint.
+| `LLM_BACKEND` | Implementation | Notes |
+|---|---|---|
+| `ollama` (default) | `llm/ollama_backend.py` — local [`sqlcoder`](https://github.com/defog-ai/sqlcoder) via [Ollama](https://ollama.com) | Free, private, no data leaves your machine. A quantized 7B model running on CPU/shared-GPU — not perfectly accurate (see Known limitations). |
+| `api` | `llm/api_backend.py` — any OpenAI-compatible chat-completion API, defaults to [NVIDIA's hosted endpoint](https://build.nvidia.com) | Needs `API_KEY` in `.env`. In testing, a 70B instruct model via this path produced correct SQL and clean explanations on the first attempt for questions where `sqlcoder` needed retries or failed outright (see BUILD_LOG.md). |
 
-It is **not** perfectly accurate — it's a quantized 7B model running on CPU. In testing it occasionally picked the wrong column for an ambiguous question, or returned a non-SQL "hint" instead of a query. The retry loop and the read-only safety check exist specifically to make those failure modes safe (no crash, no destructive query) rather than to make the model perfect. A hosted API model can be swapped in later by adding a new `LLMBackend` implementation.
+Both backends implement the same `LLMBackend` interface (`generate_sql`, `explain_result`) but use different prompt shapes under the hood: `sqlcoder` is a raw-completion model fine-tuned on a specific `[QUESTION]...[SQL]` template (`pipeline/prompt_templates.py`'s `SQLCODER_PROMPT`), while general instruct models expect a system/user chat message split (`build_sql_chat_messages` / `build_explain_chat_messages` in the same file). The retry loop and safety check apply identically regardless of which backend produced the SQL.
 
 ## Setup
 
@@ -40,6 +43,7 @@ ollama pull sqlcoder
 
 cp .env.example .env
 # edit .env: point DATABASE_URL at a SQLite file or a Postgres database
+# to use the hosted API backend instead of local Ollama, set LLM_BACKEND=api and API_KEY=...
 ```
 
 `DATABASE_URL` works with any SQLAlchemy-supported database. Examples:
@@ -80,11 +84,11 @@ Or run the pipeline directly without the UI (note `PYTHONPATH=.` so the top-leve
 ```bash
 PYTHONPATH=. python - <<'EOF'
 from db.schema_introspect import get_schema_text
-from llm.ollama_backend import OllamaBackend
+from llm.factory import get_backend
 from pipeline.retry import generate_and_execute
 
 schema = get_schema_text()
-backend = OllamaBackend()
+backend = get_backend()  # picks Ollama or the API backend based on LLM_BACKEND in .env
 outcome = generate_and_execute(backend, "Which breed has the most dogs?", schema)
 print(outcome)
 EOF
@@ -107,7 +111,10 @@ db/
   schema_introspect.py      # Layer 2: schema → text
 llm/
   base.py                   # LLMBackend interface
-  ollama_backend.py          # default backend: local sqlcoder via Ollama
+  factory.py                 # picks a backend based on LLM_BACKEND in .env
+  ollama_backend.py          # local sqlcoder via Ollama
+  api_backend.py              # hosted OpenAI-compatible chat API (default: NVIDIA)
+  extract.py                  # shared SQL-cleanup helper for both backends
 pipeline/
   prompt_templates.py        # prompt construction
   safety.py                  # read-only query validation

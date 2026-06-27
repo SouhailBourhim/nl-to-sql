@@ -86,9 +86,26 @@ This is invalid under the SQL standard — `c.churn_date` appears in `HAVING` wi
 
 A simpler question ("How many customers are on each plan?") succeeded correctly against the same database (24 Basic / 18 Standard / 18 Premium), confirming the happy path works end-to-end against the real Postgres database.
 
+## 9. Second LLM backend — hosted API (NVIDIA)
+
+The user provided an NVIDIA API key and asked to try it as the backend. NVIDIA's `build.nvidia.com` exposes an OpenAI-compatible chat-completions endpoint, so this was implemented as a second `LLMBackend` rather than a one-off script:
+
+- `llm/extract.py`: pulled the SQL-cleanup logic (stripping ` ```sql ` fences and stray `[SQL]`/`[/SQL]` tokens) out of `ollama_backend.py` into a shared module, since the new backend needed the same cleanup.
+- `pipeline/prompt_templates.py`: added `build_sql_chat_messages` / `build_explain_chat_messages` — a system/user message-pair format, distinct from sqlcoder's raw-completion template. General instruct models weren't fine-tuned on the `[QUESTION]...[SQL]` template and respond better to plain chat instructions.
+- `config.py`: replaced the placeholder `OPENAI_API_KEY`/`OPENAI_MODEL` settings with generic `API_BASE_URL` / `API_KEY` / `API_MODEL`, defaulting to NVIDIA's endpoint and a guessed model id (`meta/llama-3.1-70b-instruct`).
+- `llm/api_backend.py`: new `ApiBackend` implementation.
+- `llm/factory.py`: new — `get_backend()` picks `OllamaBackend` or `ApiBackend` based on `LLM_BACKEND` in `.env`, so `app.py` no longer hardcodes a specific backend.
+
+The model id guess was verified correct on the first live API call (a trivial "say hello" request returned `200` with `"model":"meta/llama-3.1-70b-instruct"` echoed back).
+
+**Result**: both test questions — including "Which customers churned and had more than 5 recharges?", the exact question that defeated `sqlcoder` after 3 retries against Postgres (see the `GroupingError` finding above) — succeeded on the **first attempt** with this backend, with correct `GROUP BY`/`HAVING` structure and clean, well-formed natural-language explanations (no fragment leakage). This is a direct, concrete payoff of having built the `LLMBackend` abstraction early: swapping the model required zero changes to the prompt-construction pattern's *call sites*, the safety check, the retry loop, or the executor — only a new backend implementation and one `.env` value (`LLM_BACKEND=api`).
+
+The Postgres container had also stopped again during this stretch of the session (same root cause as before — the Mac went to sleep) and needed another `docker start nl_to_sql_pg`; data was intact both times.
+
 ## Open items / known limitations (not yet fixed)
 
-- Explainer step occasionally returns a SQL fragment instead of a sentence (sqlcoder is not a prose model).
-- Model cannot always self-correct Postgres's stricter `GROUP BY` enforcement even when given the exact error.
+- Explainer step occasionally returns a SQL fragment instead of a sentence when using the `sqlcoder`/Ollama backend (sqlcoder is not a prose model). Not observed with the `api` backend in testing so far.
+- The `sqlcoder`/Ollama backend cannot always self-correct Postgres's stricter `GROUP BY` enforcement even when given the exact error; the `api` backend resolved the same question correctly without needing a retry.
 - UI has not been manually click-tested in a real browser session.
 - No automated evaluation harness yet (Spider dataset is present on disk but unused for this).
+- The NVIDIA `API_MODEL` default (`meta/llama-3.1-70b-instruct`) was chosen as an educated guess and only spot-checked with a couple of questions — not yet run through a broader test set.
