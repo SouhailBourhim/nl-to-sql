@@ -86,9 +86,53 @@ This is invalid under the SQL standard — `c.churn_date` appears in `HAVING` wi
 
 A simpler question ("How many customers are on each plan?") succeeded correctly against the same database (24 Basic / 18 Standard / 18 Premium), confirming the happy path works end-to-end against the real Postgres database.
 
+## 9. Second LLM backend — hosted API (NVIDIA)
+
+The user provided an NVIDIA API key and asked to try it as the backend. NVIDIA's `build.nvidia.com` exposes an OpenAI-compatible chat-completions endpoint, so this was implemented as a second `LLMBackend` rather than a one-off script:
+
+- `llm/extract.py`: pulled the SQL-cleanup logic (stripping ` ```sql ` fences and stray `[SQL]`/`[/SQL]` tokens) out of `ollama_backend.py` into a shared module, since the new backend needed the same cleanup.
+- `pipeline/prompt_templates.py`: added `build_sql_chat_messages` / `build_explain_chat_messages` — a system/user message-pair format, distinct from sqlcoder's raw-completion template. General instruct models weren't fine-tuned on the `[QUESTION]...[SQL]` template and respond better to plain chat instructions.
+- `config.py`: replaced the placeholder `OPENAI_API_KEY`/`OPENAI_MODEL` settings with generic `API_BASE_URL` / `API_KEY` / `API_MODEL`, defaulting to NVIDIA's endpoint and a guessed model id (`meta/llama-3.1-70b-instruct`).
+- `llm/api_backend.py`: new `ApiBackend` implementation.
+- `llm/factory.py`: new — `get_backend()` picks `OllamaBackend` or `ApiBackend` based on `LLM_BACKEND` in `.env`, so `app.py` no longer hardcodes a specific backend.
+
+The model id guess was verified correct on the first live API call (a trivial "say hello" request returned `200` with `"model":"meta/llama-3.1-70b-instruct"` echoed back).
+
+**Result**: both test questions — including "Which customers churned and had more than 5 recharges?", the exact question that defeated `sqlcoder` after 3 retries against Postgres (see the `GroupingError` finding above) — succeeded on the **first attempt** with this backend, with correct `GROUP BY`/`HAVING` structure and clean, well-formed natural-language explanations (no fragment leakage). This is a direct, concrete payoff of having built the `LLMBackend` abstraction early: swapping the model required zero changes to the prompt-construction pattern's *call sites*, the safety check, the retry loop, or the executor — only a new backend implementation and one `.env` value (`LLM_BACKEND=api`).
+
+The Postgres container had also stopped again during this stretch of the session (same root cause as before — the Mac went to sleep) and needed another `docker start nl_to_sql_pg`; data was intact both times.
+
+## 10. PR review fixes and reliability hardening
+
+A Sourcery automated review on the NVIDIA-backend PR flagged three real issues, all fixed and pushed to the same branch:
+- `ApiBackend._chat` assumed an OpenAI-style success payload and would raise an opaque `KeyError`/`IndexError` on any unexpected response shape. Fixed by validating `choices`/`message`/`content` exist with the right types before indexing, raising a `RuntimeError` with the raw payload otherwise.
+- `extract_sql`'s fence regex only matched ` ```sql ` fences; plain untagged ` ``` ` fences (common from chat models) passed straight through. Broadened to `` ```(?:sql)?\s*(.*?)``` ``.
+- `llm/factory.get_backend` silently fell back to `OllamaBackend` for any `LLM_BACKEND` value other than exactly `"api"`, so a typo like `LLM_BACKEND=API` would silently switch backends. Fixed by validating against a whitelist and raising `ValueError` on anything else.
+
+Separately, addressed the "reliability" improvements identified earlier in this log:
+- **Configurable generation params**: `ApiBackend` had `temperature`, `max_tokens`, and `timeout` hardcoded (also flagged by Sourcery). Moved to `config.py` as `API_TEMPERATURE`/`API_MAX_TOKENS`/`API_TIMEOUT_SECONDS`, with matching `OLLAMA_TEMPERATURE`/`OLLAMA_TIMEOUT_SECONDS` added for the other backend too, for consistency.
+- **Temperature escalation across retries**: previously every retry attempt used the same fixed temperature, so a model that landed on a bad answer (the "stuck" behavior documented in section 3) had no real chance to produce something different on retry 2 or 3. Added `LLMBackend.generate_sql`'s `attempt` parameter (threaded through from `pipeline/retry.py`) and `llm/temperature.escalate()`, which raises temperature by `0.2` per attempt up to a cap of `0.9`. Both backends now use this.
+- **`MAX_ATTEMPTS` bumped from 3 to 4**, giving the escalation a bit more room since the cost of an extra attempt is low.
+
+Explicitly *not* done yet (flagged as a bigger design decision, not implemented speculatively): splitting SQL generation and explanation across different backends (e.g. always use the API backend for `explain_result` even when Ollama is selected for SQL generation), since `sqlcoder` is fine-tuned for SQL and weaker at prose. Noted as a future option rather than built, since it changes the backend-selection model from "one model for everything" to "per-task model routing."
+
+## 11. Safety hardening: known-table validation and statement timeout
+
+Addressed the two safety improvements identified earlier in this log:
+
+- **Known-table validation** (`pipeline/safety.py:validate_known_tables`): regex-extracts identifiers following `FROM`/`JOIN`, normalizes schema-qualified names (`public.customers` → `customers`), excludes CTE-defined names (`WITH foo AS (...)`) since those are locally scoped rather than real tables, and checks the rest against `db.schema_introspect.get_known_tables()` (a new function returning the lowercased real table names from SQLAlchemy's inspector). A hallucinated table name now fails fast with a clear message naming the bad table, instead of a confusing database-level "relation does not exist" error after a wasted round trip. Verified directly: `SELECT * FROM invoices` against the seeded DB (which has no `invoices` table) returns `Query references unknown table(s): invoices. Known tables: customers, plans, recharges.`
+- **Statement timeout** (`pipeline/executor.py`): `ensure_row_limit` only bounds rows *returned* — an unfiltered query can still scan an entire large table before that limit applies. Added `SET statement_timeout = <STATEMENT_TIMEOUT_MS>` on the connection before executing (Postgres-only; skipped for SQLite, which has no equivalent). Verified the setting actually takes effect with `SHOW statement_timeout`.
+
+`pipeline/retry.py` now fetches `known_tables` once per question (not once per retry attempt) and passes it into `execute_sql`, avoiding a redundant schema-introspection call on every retry.
+
+Also added `tests/test_safety.py` — the first real test file in the project (previously an empty stub). 11 unit tests covering `validate_read_only`, `validate_known_tables`, and `ensure_row_limit`; all pure logic, no DB or LLM dependency, so they run instantly and don't need Ollama/Postgres/NVIDIA reachable. Added `pytest` to `requirements.txt`.
+
+Re-ran the full pipeline against the real Postgres DB after these changes to confirm the happy path still works unaffected — it does.
+
 ## Open items / known limitations (not yet fixed)
 
-- Explainer step occasionally returns a SQL fragment instead of a sentence (sqlcoder is not a prose model).
-- Model cannot always self-correct Postgres's stricter `GROUP BY` enforcement even when given the exact error.
+- Explainer step occasionally returns a SQL fragment instead of a sentence when using the `sqlcoder`/Ollama backend (sqlcoder is not a prose model). Not observed with the `api` backend in testing so far.
+- The `sqlcoder`/Ollama backend cannot always self-correct Postgres's stricter `GROUP BY` enforcement even when given the exact error; the `api` backend resolved the same question correctly without needing a retry.
 - UI has not been manually click-tested in a real browser session.
 - No automated evaluation harness yet (Spider dataset is present on disk but unused for this).
+- The NVIDIA `API_MODEL` default (`meta/llama-3.1-70b-instruct`) was chosen as an educated guess and only spot-checked with a couple of questions — not yet run through a broader test set.

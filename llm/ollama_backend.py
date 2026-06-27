@@ -4,6 +4,8 @@ import requests
 
 import config
 from llm.base import LLMBackend
+from llm.extract import extract_sql
+from llm.temperature import escalate
 from pipeline.prompt_templates import build_explain_prompt, build_sql_prompt
 
 
@@ -20,7 +22,7 @@ class OllamaBackend(LLMBackend):
         self.host = host
         self.model = model
 
-    def _generate(self, prompt: str) -> str:
+    def _generate(self, prompt: str, temperature: float = config.OLLAMA_TEMPERATURE) -> str:
         response = requests.post(
             f"{self.host}/api/generate",
             json={
@@ -33,21 +35,24 @@ class OllamaBackend(LLMBackend):
                 # keeps answers close to the model's best guess while still
                 # giving the retry loop in pipeline/retry.py a real second
                 # chance to land on a different, hopefully correct, output.
-                "options": {"temperature": 0.3},
+                "options": {"temperature": temperature},
             },
             # A 7B model on a shared CPU/GPU machine (especially with other
             # services like Postgres/Docker running) can occasionally take
             # well over a minute; 120s clipped real, successful generations
             # in testing under load, so this leaves more margin.
-            timeout=240,
+            timeout=config.OLLAMA_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         return response.json()["response"]
 
-    def generate_sql(self, question: str, schema_text: str, prior_error: str | None = None) -> str:
+    def generate_sql(
+        self, question: str, schema_text: str, prior_error: str | None = None, attempt: int = 1
+    ) -> str:
         prompt = build_sql_prompt(question, schema_text, prior_error)
-        raw = self._generate(prompt)
-        return _extract_sql(raw)
+        temperature = escalate(config.OLLAMA_TEMPERATURE, attempt)
+        raw = self._generate(prompt, temperature=temperature)
+        return extract_sql(raw)
 
     def explain_result(self, question: str, sql: str, columns: list[str], rows: list[tuple]) -> str:
         prompt = build_explain_prompt(question, sql, columns, rows)
@@ -56,16 +61,3 @@ class OllamaBackend(LLMBackend):
         # echo a markdown header (e.g. "### Answer #:") before the actual
         # sentence, a habit picked up from its SQL-prompt training data.
         return re.sub(r"^#+.*\n+", "", raw.strip()).strip()
-
-
-def _extract_sql(raw_text: str) -> str:
-    """sqlcoder sometimes wraps its answer in a ```sql fence, and since our
-    template ends with the literal token "[SQL]", the model often echoes it
-    back (either as an opening tag before its answer or a closing [/SQL]
-    after it) -- strip whichever markers show up so we're left with bare SQL."""
-    text = raw_text.strip()
-    fence_match = re.search(r"```sql\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    if fence_match:
-        text = fence_match.group(1)
-    text = re.sub(r"\[/?SQL\]", "", text, flags=re.IGNORECASE)
-    return text.strip().rstrip(";").strip()

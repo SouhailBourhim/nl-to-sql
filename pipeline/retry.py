@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 
+from db.schema_introspect import get_known_tables
 from llm.base import LLMBackend
 from pipeline.executor import ExecutionError, ExecutionResult, execute_sql
 
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 4
 
 
 @dataclass
@@ -28,13 +29,19 @@ def generate_and_execute(
     the database's actual complaint (e.g. 'no such column: dog.breed') --
     the same way a human would glance at the error and correct the query.
     Capped at MAX_ATTEMPTS so a persistently broken question doesn't loop forever.
+
+    The attempt number is passed through to the backend so it can raise
+    sampling temperature on later tries (see llm/temperature.py) -- a model
+    that's deterministically stuck on a wrong answer needs added randomness
+    to have any real chance of landing on something different.
     """
     prior_error = None
     sql = ""
+    known_tables = get_known_tables()
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        sql = backend.generate_sql(question, schema_text, prior_error)
-        outcome = execute_sql(sql)
+        sql = backend.generate_sql(question, schema_text, prior_error, attempt=attempt)
+        outcome = execute_sql(sql, known_tables=known_tables)
 
         if isinstance(outcome, ExecutionResult):
             return PipelineResult(sql=sql, result=outcome, attempts=attempt)

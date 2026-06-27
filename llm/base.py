@@ -11,7 +11,14 @@ class LLMBackend(ABC):
     """
 
     @abstractmethod
-    def generate_sql(self, question: str, schema_text: str, prior_error: Optional[str] = None) -> str:
+    def generate_sql(
+        self, question: str, schema_text: str, prior_error: Optional[str] = None, attempt: int = 1
+    ) -> str:
+        """`attempt` is the 1-based retry count from pipeline/retry.py. Backends
+        may use it to raise sampling temperature on later attempts -- testing
+        showed a model can get deterministically stuck repeating the same wrong
+        answer otherwise, making retries pointless without some added variance.
+        """
         ...
 
     @abstractmethod

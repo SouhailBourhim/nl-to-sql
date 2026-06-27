@@ -1,7 +1,7 @@
 import streamlit as st
 
 from db.schema_introspect import get_schema_text
-from llm.ollama_backend import OllamaBackend
+from llm.factory import get_backend as _get_backend
 from pipeline.executor import execute_sql, ExecutionResult
 from pipeline.explainer import explain
 from pipeline.retry import PipelineFailure, PipelineResult, generate_and_execute
@@ -11,7 +11,7 @@ st.set_page_config(page_title="NL to SQL", layout="wide")
 
 @st.cache_resource
 def get_backend():
-    return OllamaBackend()
+    return _get_backend()
 
 
 @st.cache_data

@@ -20,13 +20,16 @@ This is a learning project built layer by layer, with each layer testable in iso
 | 4. Execution | Validates the SQL is read-only, runs it, retries with the error fed back to the LLM if it fails | `pipeline/safety.py`, `pipeline/executor.py`, `pipeline/retry.py` |
 | 5. Output | Turns the result rows into a one/two-sentence plain-language answer | `pipeline/explainer.py` |
 
-The LLM call goes through an abstract `LLMBackend` interface (`llm/base.py`), so the model behind it can be swapped without touching the pipeline.
+The LLM call goes through an abstract `LLMBackend` interface (`llm/base.py`), so the model behind it can be swapped via one config value (`LLM_BACKEND` in `.env`) without touching the pipeline. `llm/factory.py` picks the implementation at runtime.
 
-## Why a local model?
+## Two LLM backends
 
-The default backend (`llm/ollama_backend.py`) runs [`sqlcoder`](https://github.com/defog-ai/sqlcoder) locally via [Ollama](https://ollama.com) — free, private (no data leaves your machine), and reasonably close to the original `defog/sqlcoder-7b` choice without needing a GPU or a paid hosted endpoint.
+| `LLM_BACKEND` | Implementation | Notes |
+|---|---|---|
+| `ollama` (default) | `llm/ollama_backend.py` — local [`sqlcoder`](https://github.com/defog-ai/sqlcoder) via [Ollama](https://ollama.com) | Free, private, no data leaves your machine. A quantized 7B model running on CPU/shared-GPU — not perfectly accurate (see Known limitations). |
+| `api` | `llm/api_backend.py` — any OpenAI-compatible chat-completion API, defaults to [NVIDIA's hosted endpoint](https://build.nvidia.com) | Needs `API_KEY` in `.env`. In testing, a 70B instruct model via this path produced correct SQL and clean explanations on the first attempt for questions where `sqlcoder` needed retries or failed outright (see BUILD_LOG.md). |
 
-It is **not** perfectly accurate — it's a quantized 7B model running on CPU. In testing it occasionally picked the wrong column for an ambiguous question, or returned a non-SQL "hint" instead of a query. The retry loop and the read-only safety check exist specifically to make those failure modes safe (no crash, no destructive query) rather than to make the model perfect. A hosted API model can be swapped in later by adding a new `LLMBackend` implementation.
+Both backends implement the same `LLMBackend` interface (`generate_sql`, `explain_result`) but use different prompt shapes under the hood: `sqlcoder` is a raw-completion model fine-tuned on a specific `[QUESTION]...[SQL]` template (`pipeline/prompt_templates.py`'s `SQLCODER_PROMPT`), while general instruct models expect a system/user chat message split (`build_sql_chat_messages` / `build_explain_chat_messages` in the same file). The retry loop and safety check apply identically regardless of which backend produced the SQL.
 
 ## Setup
 
@@ -40,6 +43,7 @@ ollama pull sqlcoder
 
 cp .env.example .env
 # edit .env: point DATABASE_URL at a SQLite file or a Postgres database
+# to use the hosted API backend instead of local Ollama, set LLM_BACKEND=api and API_KEY=...
 ```
 
 `DATABASE_URL` works with any SQLAlchemy-supported database. Examples:
@@ -80,19 +84,33 @@ Or run the pipeline directly without the UI (note `PYTHONPATH=.` so the top-leve
 ```bash
 PYTHONPATH=. python - <<'EOF'
 from db.schema_introspect import get_schema_text
-from llm.ollama_backend import OllamaBackend
+from llm.factory import get_backend
 from pipeline.retry import generate_and_execute
 
 schema = get_schema_text()
-backend = OllamaBackend()
+backend = get_backend()  # picks Ollama or the API backend based on LLM_BACKEND in .env
 outcome = generate_and_execute(backend, "Which breed has the most dogs?", schema)
 print(outcome)
 EOF
 ```
 
+## Reliability tuning
+
+Both backends' sampling temperature, token limits, and request timeouts are configurable via `.env` (`OLLAMA_TEMPERATURE`/`OLLAMA_TIMEOUT_SECONDS`, `API_TEMPERATURE`/`API_MAX_TOKENS`/`API_TIMEOUT_SECONDS`) rather than hardcoded.
+
+The retry loop (`pipeline/retry.py`, `MAX_ATTEMPTS=4`) also escalates temperature on each retry via `llm/temperature.escalate()`: if a model gets deterministically stuck repeating the same wrong answer, a fixed temperature means every retry produces an identical result, making the retry pointless. Escalating temperature on each attempt gives later retries a real chance to land on something different.
+
 ## Safety
 
-LLM-generated SQL is never trusted blindly. `pipeline/safety.py` rejects anything that isn't a single read-only `SELECT`/`WITH` statement *before* it reaches the database, and caps result size with an injected `LIMIT` if the model didn't add one. This guards against a natural-language question accidentally being translated into a destructive statement (e.g. "remove the churned customers" → `DELETE`).
+LLM-generated SQL is never trusted blindly. `pipeline/safety.py` runs three checks before a query reaches the database:
+
+1. **Read-only enforcement** — rejects anything that isn't a single `SELECT`/`WITH` statement. Guards against a natural-language question accidentally being translated into a destructive statement (e.g. "remove the churned customers" → `DELETE`).
+2. **Known-table validation** — rejects a query referencing a table name that doesn't exist in the introspected schema, with a clear error naming the bad table instead of a confusing database-level error. Catches a model hallucinating a table name before wasting a round trip.
+3. **Row limit** — caps result size with an injected `LIMIT` if the model didn't add one.
+
+These are regex-based checks, not a full SQL parser — proportionate to the actual threat model (an LLM mistranslating English into a wrong query), not an adversarial attacker crafting an injection payload.
+
+A fourth guard lives in `pipeline/executor.py`: a Postgres `statement_timeout` (`STATEMENT_TIMEOUT_MS` in `.env`, default 5000ms) is set on every connection before executing. The row limit only bounds rows *returned* — an unfiltered query can still scan an entire large table before that limit ever applies — so the timeout bounds actual execution cost regardless of how the query is shaped.
 
 ## Evaluation dataset (not included)
 
@@ -107,7 +125,10 @@ db/
   schema_introspect.py      # Layer 2: schema → text
 llm/
   base.py                   # LLMBackend interface
-  ollama_backend.py          # default backend: local sqlcoder via Ollama
+  factory.py                 # picks a backend based on LLM_BACKEND in .env
+  ollama_backend.py          # local sqlcoder via Ollama
+  api_backend.py              # hosted OpenAI-compatible chat API (default: NVIDIA)
+  extract.py                  # shared SQL-cleanup helper for both backends
 pipeline/
   prompt_templates.py        # prompt construction
   safety.py                  # read-only query validation
