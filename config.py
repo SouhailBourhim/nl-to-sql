@@ -21,3 +21,8 @@ API_TEMPERATURE = float(os.environ.get("API_TEMPERATURE", "0.2"))
 API_MAX_TOKENS = int(os.environ.get("API_MAX_TOKENS", "1024"))
 API_TIMEOUT_SECONDS = int(os.environ.get("API_TIMEOUT_SECONDS", "120"))
 MAX_RESULT_ROWS = int(os.environ.get("MAX_RESULT_ROWS", "200"))
+# Hard cap on query execution time on the database side (Postgres only).
+# MAX_RESULT_ROWS only limits rows *returned* -- an unfiltered query can
+# still scan an entire large table before that limit ever applies. A
+# statement timeout bounds actual cost regardless of how the query is shaped.
+STATEMENT_TIMEOUT_MS = int(os.environ.get("STATEMENT_TIMEOUT_MS", "5000"))

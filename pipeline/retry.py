@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from db.schema_introspect import get_known_tables
 from llm.base import LLMBackend
 from pipeline.executor import ExecutionError, ExecutionResult, execute_sql
 
@@ -36,10 +37,11 @@ def generate_and_execute(
     """
     prior_error = None
     sql = ""
+    known_tables = get_known_tables()
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         sql = backend.generate_sql(question, schema_text, prior_error, attempt=attempt)
-        outcome = execute_sql(sql)
+        outcome = execute_sql(sql, known_tables=known_tables)
 
         if isinstance(outcome, ExecutionResult):
             return PipelineResult(sql=sql, result=outcome, attempts=attempt)

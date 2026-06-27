@@ -116,6 +116,19 @@ Separately, addressed the "reliability" improvements identified earlier in this 
 
 Explicitly *not* done yet (flagged as a bigger design decision, not implemented speculatively): splitting SQL generation and explanation across different backends (e.g. always use the API backend for `explain_result` even when Ollama is selected for SQL generation), since `sqlcoder` is fine-tuned for SQL and weaker at prose. Noted as a future option rather than built, since it changes the backend-selection model from "one model for everything" to "per-task model routing."
 
+## 11. Safety hardening: known-table validation and statement timeout
+
+Addressed the two safety improvements identified earlier in this log:
+
+- **Known-table validation** (`pipeline/safety.py:validate_known_tables`): regex-extracts identifiers following `FROM`/`JOIN`, normalizes schema-qualified names (`public.customers` → `customers`), excludes CTE-defined names (`WITH foo AS (...)`) since those are locally scoped rather than real tables, and checks the rest against `db.schema_introspect.get_known_tables()` (a new function returning the lowercased real table names from SQLAlchemy's inspector). A hallucinated table name now fails fast with a clear message naming the bad table, instead of a confusing database-level "relation does not exist" error after a wasted round trip. Verified directly: `SELECT * FROM invoices` against the seeded DB (which has no `invoices` table) returns `Query references unknown table(s): invoices. Known tables: customers, plans, recharges.`
+- **Statement timeout** (`pipeline/executor.py`): `ensure_row_limit` only bounds rows *returned* — an unfiltered query can still scan an entire large table before that limit applies. Added `SET statement_timeout = <STATEMENT_TIMEOUT_MS>` on the connection before executing (Postgres-only; skipped for SQLite, which has no equivalent). Verified the setting actually takes effect with `SHOW statement_timeout`.
+
+`pipeline/retry.py` now fetches `known_tables` once per question (not once per retry attempt) and passes it into `execute_sql`, avoiding a redundant schema-introspection call on every retry.
+
+Also added `tests/test_safety.py` — the first real test file in the project (previously an empty stub). 11 unit tests covering `validate_read_only`, `validate_known_tables`, and `ensure_row_limit`; all pure logic, no DB or LLM dependency, so they run instantly and don't need Ollama/Postgres/NVIDIA reachable. Added `pytest` to `requirements.txt`.
+
+Re-ran the full pipeline against the real Postgres DB after these changes to confirm the happy path still works unaffected — it does.
+
 ## Open items / known limitations (not yet fixed)
 
 - Explainer step occasionally returns a SQL fragment instead of a sentence when using the `sqlcoder`/Ollama backend (sqlcoder is not a prose model). Not observed with the `api` backend in testing so far.

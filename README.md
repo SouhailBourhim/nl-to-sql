@@ -102,7 +102,15 @@ The retry loop (`pipeline/retry.py`, `MAX_ATTEMPTS=4`) also escalates temperatur
 
 ## Safety
 
-LLM-generated SQL is never trusted blindly. `pipeline/safety.py` rejects anything that isn't a single read-only `SELECT`/`WITH` statement *before* it reaches the database, and caps result size with an injected `LIMIT` if the model didn't add one. This guards against a natural-language question accidentally being translated into a destructive statement (e.g. "remove the churned customers" → `DELETE`).
+LLM-generated SQL is never trusted blindly. `pipeline/safety.py` runs three checks before a query reaches the database:
+
+1. **Read-only enforcement** — rejects anything that isn't a single `SELECT`/`WITH` statement. Guards against a natural-language question accidentally being translated into a destructive statement (e.g. "remove the churned customers" → `DELETE`).
+2. **Known-table validation** — rejects a query referencing a table name that doesn't exist in the introspected schema, with a clear error naming the bad table instead of a confusing database-level error. Catches a model hallucinating a table name before wasting a round trip.
+3. **Row limit** — caps result size with an injected `LIMIT` if the model didn't add one.
+
+These are regex-based checks, not a full SQL parser — proportionate to the actual threat model (an LLM mistranslating English into a wrong query), not an adversarial attacker crafting an injection payload.
+
+A fourth guard lives in `pipeline/executor.py`: a Postgres `statement_timeout` (`STATEMENT_TIMEOUT_MS` in `.env`, default 5000ms) is set on every connection before executing. The row limit only bounds rows *returned* — an unfiltered query can still scan an entire large table before that limit ever applies — so the timeout bounds actual execution cost regardless of how the query is shaped.
 
 ## Evaluation dataset (not included)
 

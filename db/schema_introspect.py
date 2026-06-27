@@ -3,6 +3,13 @@ from sqlalchemy import inspect
 from db.connection import engine
 
 
+def get_known_tables() -> set[str]:
+    """Lowercased set of real table names, used by pipeline/safety.py to catch
+    a hallucinated table name before wasting a round trip to the database."""
+    inspector = inspect(engine)
+    return {name.lower() for name in inspector.get_table_names()}
+
+
 def get_schema_text() -> str:
     """Serialize the connected database's schema as CREATE TABLE-style text.
 
