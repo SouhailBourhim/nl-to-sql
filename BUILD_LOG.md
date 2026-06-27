@@ -129,10 +129,21 @@ Also added `tests/test_safety.py` — the first real test file in the project (p
 
 Re-ran the full pipeline against the real Postgres DB after these changes to confirm the happy path still works unaffected — it does.
 
+## 12. Offline integration test suite
+
+Addressed the "no automated evaluation harness" / "tests depend on live infra" gap identified earlier. Rather than building the Spider-benchmark harness (a bigger, separate undertaking -- still open below), focused on a more immediately useful gap: there was no way to test the pipeline's control flow (retry behavior, safety enforcement, explainer wiring) without a live model and a running Postgres container.
+
+- `tests/conftest.py`: sets `DATABASE_URL` to a throwaway SQLite file *before* `config.py` (or anything importing it) is loaded anywhere in the test session, then creates and seeds a small schema in a session-scoped fixture. The ordering matters -- `config.DATABASE_URL` and `db/connection.py`'s `engine` are both bound once at import time, so the env var has to be set first or the test suite would silently hit whatever `.env` points at (the real Postgres DB).
+- `tests/fakes.py`: `FakeLLMBackend`, a canned-response `LLMBackend` implementation. Takes a list of SQL strings (one per retry attempt) and a canned explanation, and records every call it receives -- enough to script scenarios like "wrong query on attempt 1, corrected query on attempt 2" and assert the retry loop actually retried rather than just inspecting final output.
+- `tests/test_pipeline_integration.py`: 6 tests covering the full `generate_and_execute` flow -- first-attempt success, retry-then-succeed, exhausting all retries, a destructive query being blocked outright (never even reaching a retry), the explainer being wired correctly, and `execute_sql` rejecting a hallucinated table.
+- `pytest.ini`: added `pythonpath = .` so `pytest` works directly without manually exporting `PYTHONPATH=.` first.
+
+Verified the independence claim directly: stopped the Postgres container (`docker stop nl_to_sql_pg`) and reran the full suite -- all 17 tests (11 from `test_safety.py` + 6 new ones) still passed in under 0.05s, then restarted the container.
+
 ## Open items / known limitations (not yet fixed)
 
 - Explainer step occasionally returns a SQL fragment instead of a sentence when using the `sqlcoder`/Ollama backend (sqlcoder is not a prose model). Not observed with the `api` backend in testing so far.
 - The `sqlcoder`/Ollama backend cannot always self-correct Postgres's stricter `GROUP BY` enforcement even when given the exact error; the `api` backend resolved the same question correctly without needing a retry.
 - UI has not been manually click-tested in a real browser session.
-- No automated evaluation harness yet (Spider dataset is present on disk but unused for this).
+- No Spider-benchmark-based evaluation harness yet (dataset is present on disk but unused for this) -- the new test suite covers pipeline *control flow* with canned responses, not real-model *accuracy* against a benchmark.
 - The NVIDIA `API_MODEL` default (`meta/llama-3.1-70b-instruct`) was chosen as an educated guess and only spot-checked with a couple of questions — not yet run through a broader test set.

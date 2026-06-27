@@ -94,6 +94,14 @@ print(outcome)
 EOF
 ```
 
+## Testing
+
+```bash
+pytest
+```
+
+The suite (`tests/`) runs entirely offline — no Ollama, no NVIDIA API, no Docker/Postgres needed. `tests/conftest.py` points `DATABASE_URL` at a throwaway SQLite file (created and torn down per test session) before `config.py` is ever imported, so it never touches your real database. `tests/fakes.py` provides `FakeLLMBackend`, a canned-response stand-in for `LLMBackend` that lets `test_pipeline_integration.py` exercise the full generate → safety-check → execute → retry → explain flow deterministically — including scripting "wrong query, then a corrected one" to test the retry loop without depending on a real model's behavior. `test_safety.py` covers the safety checks in isolation.
+
 ## Reliability tuning
 
 Both backends' sampling temperature, token limits, and request timeouts are configurable via `.env` (`OLLAMA_TEMPERATURE`/`OLLAMA_TIMEOUT_SECONDS`, `API_TEMPERATURE`/`API_MAX_TOKENS`/`API_TIMEOUT_SECONDS`) rather than hardcoded.
@@ -137,6 +145,11 @@ pipeline/
   explainer.py                 # result → natural-language answer
 scripts/
   seed_db.py                   # creates and seeds the sample Postgres schema
+tests/
+  conftest.py                   # throwaway SQLite fixture for offline tests
+  fakes.py                       # FakeLLMBackend, a canned-response LLMBackend
+  test_safety.py                  # unit tests for pipeline/safety.py
+  test_pipeline_integration.py     # full pipeline flow against the fixture DB
 app.py                         # Streamlit UI
 ```
 
