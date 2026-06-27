@@ -44,7 +44,22 @@ class ApiBackend(LLMBackend):
             timeout=120,
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"Chat completion response was not valid JSON: {response.text}") from exc
+
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError(f"Chat completion response had no 'choices': {data}")
+
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str):
+            raise RuntimeError(f"Chat completion response had no usable message content: {data}")
+
+        return content
 
     def generate_sql(self, question: str, schema_text: str, prior_error: str | None = None) -> str:
         messages = build_sql_chat_messages(question, schema_text, prior_error)
