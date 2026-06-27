@@ -94,6 +94,12 @@ print(outcome)
 EOF
 ```
 
+## Reliability tuning
+
+Both backends' sampling temperature, token limits, and request timeouts are configurable via `.env` (`OLLAMA_TEMPERATURE`/`OLLAMA_TIMEOUT_SECONDS`, `API_TEMPERATURE`/`API_MAX_TOKENS`/`API_TIMEOUT_SECONDS`) rather than hardcoded.
+
+The retry loop (`pipeline/retry.py`, `MAX_ATTEMPTS=4`) also escalates temperature on each retry via `llm/temperature.escalate()`: if a model gets deterministically stuck repeating the same wrong answer, a fixed temperature means every retry produces an identical result, making the retry pointless. Escalating temperature on each attempt gives later retries a real chance to land on something different.
+
 ## Safety
 
 LLM-generated SQL is never trusted blindly. `pipeline/safety.py` rejects anything that isn't a single read-only `SELECT`/`WITH` statement *before* it reaches the database, and caps result size with an injected `LIMIT` if the model didn't add one. This guards against a natural-language question accidentally being translated into a destructive statement (e.g. "remove the churned customers" → `DELETE`).

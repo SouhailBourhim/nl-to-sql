@@ -102,6 +102,20 @@ The model id guess was verified correct on the first live API call (a trivial "s
 
 The Postgres container had also stopped again during this stretch of the session (same root cause as before — the Mac went to sleep) and needed another `docker start nl_to_sql_pg`; data was intact both times.
 
+## 10. PR review fixes and reliability hardening
+
+A Sourcery automated review on the NVIDIA-backend PR flagged three real issues, all fixed and pushed to the same branch:
+- `ApiBackend._chat` assumed an OpenAI-style success payload and would raise an opaque `KeyError`/`IndexError` on any unexpected response shape. Fixed by validating `choices`/`message`/`content` exist with the right types before indexing, raising a `RuntimeError` with the raw payload otherwise.
+- `extract_sql`'s fence regex only matched ` ```sql ` fences; plain untagged ` ``` ` fences (common from chat models) passed straight through. Broadened to `` ```(?:sql)?\s*(.*?)``` ``.
+- `llm/factory.get_backend` silently fell back to `OllamaBackend` for any `LLM_BACKEND` value other than exactly `"api"`, so a typo like `LLM_BACKEND=API` would silently switch backends. Fixed by validating against a whitelist and raising `ValueError` on anything else.
+
+Separately, addressed the "reliability" improvements identified earlier in this log:
+- **Configurable generation params**: `ApiBackend` had `temperature`, `max_tokens`, and `timeout` hardcoded (also flagged by Sourcery). Moved to `config.py` as `API_TEMPERATURE`/`API_MAX_TOKENS`/`API_TIMEOUT_SECONDS`, with matching `OLLAMA_TEMPERATURE`/`OLLAMA_TIMEOUT_SECONDS` added for the other backend too, for consistency.
+- **Temperature escalation across retries**: previously every retry attempt used the same fixed temperature, so a model that landed on a bad answer (the "stuck" behavior documented in section 3) had no real chance to produce something different on retry 2 or 3. Added `LLMBackend.generate_sql`'s `attempt` parameter (threaded through from `pipeline/retry.py`) and `llm/temperature.escalate()`, which raises temperature by `0.2` per attempt up to a cap of `0.9`. Both backends now use this.
+- **`MAX_ATTEMPTS` bumped from 3 to 4**, giving the escalation a bit more room since the cost of an extra attempt is low.
+
+Explicitly *not* done yet (flagged as a bigger design decision, not implemented speculatively): splitting SQL generation and explanation across different backends (e.g. always use the API backend for `explain_result` even when Ollama is selected for SQL generation), since `sqlcoder` is fine-tuned for SQL and weaker at prose. Noted as a future option rather than built, since it changes the backend-selection model from "one model for everything" to "per-task model routing."
+
 ## Open items / known limitations (not yet fixed)
 
 - Explainer step occasionally returns a SQL fragment instead of a sentence when using the `sqlcoder`/Ollama backend (sqlcoder is not a prose model). Not observed with the `api` backend in testing so far.
