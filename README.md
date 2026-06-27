@@ -4,14 +4,14 @@ Ask a plain-English question about a database, get back a SQL query, the actual 
 
 ```mermaid
 flowchart LR
-    Q(["💬 'Which breed has<br/>the most dogs?'"]) --> S["1 · Schema introspection"]
+    Q(["'Which breed has<br/>the most dogs?'"]) --> S["1 · Schema introspection"]
     S --> G["2 · LLM generates SQL"]
     G --> C{"3 · Safety check"}
-    C -- blocked --> X(["❌ Rejected"])
+    C -- blocked --> X(["Rejected"])
     C -- passes --> E["4 · Execute SQL"]
     E -- error --> G
     E -- success --> O["5 · Explain result"]
-    O --> A(["✅ Plain-English answer"])
+    O --> A(["Plain-English answer"])
 ```
 
 This is a learning project built layer by layer, with each layer testable in isolation. The `4 → 2` loop is the retry path: a failed execution feeds its error back into the next generation attempt (see [Reliability tuning](#reliability-tuning)).
