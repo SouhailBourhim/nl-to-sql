@@ -34,13 +34,24 @@ def generate_and_execute(
     sampling temperature on later tries (see llm/temperature.py) -- a model
     that's deterministically stuck on a wrong answer needs added randomness
     to have any real chance of landing on something different.
+
+    backend.generate_sql can also raise outright (network error, rate limit,
+    malformed API response) rather than returning bad SQL -- that's still a
+    transient, retryable failure from the pipeline's point of view, not a
+    reason to crash the whole request, so it's caught here the same way a
+    SQL execution error is.
     """
     prior_error = None
     sql = ""
     known_tables = get_known_tables()
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        sql = backend.generate_sql(question, schema_text, prior_error, attempt=attempt)
+        try:
+            sql = backend.generate_sql(question, schema_text, prior_error, attempt=attempt)
+        except Exception as exc:
+            prior_error = f"LLM call failed: {exc}"
+            continue
+
         outcome = execute_sql(sql, known_tables=known_tables)
 
         if isinstance(outcome, ExecutionResult):

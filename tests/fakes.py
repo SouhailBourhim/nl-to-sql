@@ -9,9 +9,15 @@ class FakeLLMBackend(LLMBackend):
     retry loop deterministically.
     """
 
-    def __init__(self, sql_responses: list[str], explanation: str = "canned explanation"):
+    def __init__(
+        self,
+        sql_responses: list[str],
+        explanation: str = "canned explanation",
+        raise_on_attempts: set[int] = frozenset(),
+    ):
         self.sql_responses = sql_responses
         self.explanation = explanation
+        self.raise_on_attempts = raise_on_attempts
         self.generate_calls: list[dict] = []
 
     def generate_sql(
@@ -20,6 +26,8 @@ class FakeLLMBackend(LLMBackend):
         self.generate_calls.append(
             {"question": question, "prior_error": prior_error, "attempt": attempt}
         )
+        if attempt in self.raise_on_attempts:
+            raise RuntimeError(f"simulated transport failure on attempt {attempt}")
         index = min(attempt - 1, len(self.sql_responses) - 1)
         return self.sql_responses[index]
 

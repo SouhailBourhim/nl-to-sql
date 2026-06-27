@@ -1,3 +1,5 @@
+import time
+
 import requests
 
 import config
@@ -5,6 +7,9 @@ from llm.base import LLMBackend
 from llm.extract import extract_sql
 from llm.temperature import escalate
 from pipeline.prompt_templates import build_explain_chat_messages, build_sql_chat_messages
+
+_RATE_LIMIT_MAX_RETRIES = 3
+_RATE_LIMIT_BACKOFF_SECONDS = 2
 
 
 class ApiBackend(LLMBackend):
@@ -28,22 +33,34 @@ class ApiBackend(LLMBackend):
         self.model = model
 
     def _chat(self, messages: list[dict], temperature: float = config.API_TEMPERATURE) -> str:
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": config.API_MAX_TOKENS,
-                "stream": False,
-            },
-            # Same lesson learned with the Ollama backend: a hosted LLM call
-            # can occasionally run well past a minute (model cold-starts,
-            # free-tier throttling, etc.), so a generous margin avoids
-            # treating a slow-but-successful call as a hard failure.
-            timeout=config.API_TIMEOUT_SECONDS,
-        )
+        # A 429 (rate limit) is a transient infrastructure hiccup, not a
+        # SQL-generation problem -- worth a quick, transparent retry here
+        # rather than burning one of pipeline/retry.py's limited logical
+        # attempts on it (those are meant for the model producing bad SQL).
+        for retry_num in range(_RATE_LIMIT_MAX_RETRIES + 1):
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": config.API_MAX_TOKENS,
+                    "stream": False,
+                },
+                # Same lesson learned with the Ollama backend: a hosted LLM call
+                # can occasionally run well past a minute (model cold-starts,
+                # free-tier throttling, etc.), so a generous margin avoids
+                # treating a slow-but-successful call as a hard failure.
+                timeout=config.API_TIMEOUT_SECONDS,
+            )
+            if response.status_code == 429 and retry_num < _RATE_LIMIT_MAX_RETRIES:
+                retry_after = response.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else _RATE_LIMIT_BACKOFF_SECONDS * (retry_num + 1)
+                time.sleep(delay)
+                continue
+            break
+
         response.raise_for_status()
 
         try:

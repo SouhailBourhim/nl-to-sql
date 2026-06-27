@@ -120,9 +120,17 @@ These are regex-based checks, not a full SQL parser — proportionate to the act
 
 A fourth guard lives in `pipeline/executor.py`: a Postgres `statement_timeout` (`STATEMENT_TIMEOUT_MS` in `.env`, default 5000ms) is set on every connection before executing. The row limit only bounds rows *returned* — an unfiltered query can still scan an entire large table before that limit ever applies — so the timeout bounds actual execution cost regardless of how the query is shaped.
 
-## Evaluation dataset (not included)
+## Accuracy evaluation (Spider benchmark)
 
-This project was tested against a database from the [Spider](https://yale-lily.github.io/spider) text-to-SQL benchmark (the `dog_kennels` sample database). The full Spider dataset (~1.7GB) is not committed to this repo — download it separately from the Spider project page if you want to run broader evaluation.
+`pytest` (above) tests pipeline *control flow* with canned responses. To measure real model *accuracy*, `scripts/evaluate_spider.py` runs actual questions from the [Spider](https://yale-lily.github.io/spider) text-to-SQL benchmark through the live pipeline (whichever `LLM_BACKEND` is configured) and checks whether the result matches Spider's gold SQL when run against the same database:
+
+```bash
+PYTHONPATH=. python scripts/evaluate_spider.py --db dog_kennels --limit 20
+```
+
+This makes live LLM calls and is not part of the `pytest` suite. The full Spider dataset (~1.7GB, includes the `dog_kennels` SQLite database used above) is not committed to this repo — download it separately from the Spider project page.
+
+The match check is execution accuracy with a simplification: each row's values are sorted before comparing rows (order-insensitive on both rows and columns within a row), which is looser than Spider's official column-permutation-aware metric but adequate for a learning-project sanity check rather than a publishable benchmark number.
 
 ## Project structure
 
@@ -145,11 +153,13 @@ pipeline/
   explainer.py                 # result → natural-language answer
 scripts/
   seed_db.py                   # creates and seeds the sample Postgres schema
+  evaluate_spider.py            # real-model accuracy check against Spider benchmark
 tests/
   conftest.py                   # throwaway SQLite fixture for offline tests
   fakes.py                       # FakeLLMBackend, a canned-response LLMBackend
   test_safety.py                  # unit tests for pipeline/safety.py
   test_pipeline_integration.py     # full pipeline flow against the fixture DB
+  test_api_backend.py              # rate-limit retry logic (mocked HTTP)
 app.py                         # Streamlit UI
 ```
 

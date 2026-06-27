@@ -67,3 +67,29 @@ def test_execute_sql_rejects_hallucinated_table():
 
     assert isinstance(result, ExecutionError)
     assert "invoices" in result.message
+
+
+def test_generate_and_execute_recovers_from_backend_exception():
+    # A network error/rate limit/malformed API response raises rather than
+    # returning bad SQL -- the retry loop should treat that as retryable
+    # too, not let it crash the whole request (this is what actually
+    # happened with a live 429 from NVIDIA's API before this fix).
+    backend = FakeLLMBackend(
+        ["SELECT COUNT(*) AS n FROM customers"], raise_on_attempts={1}
+    )
+    schema = get_schema_text()
+
+    outcome = generate_and_execute(backend, "How many customers are there?", schema)
+
+    assert isinstance(outcome, PipelineResult)
+    assert outcome.attempts == 2
+
+
+def test_generate_and_execute_fails_cleanly_if_backend_always_raises():
+    backend = FakeLLMBackend([], raise_on_attempts={1, 2, 3, 4})
+    schema = get_schema_text()
+
+    outcome = generate_and_execute(backend, "How many customers are there?", schema)
+
+    assert isinstance(outcome, PipelineFailure)
+    assert "simulated transport failure" in outcome.last_error
