@@ -14,7 +14,28 @@ flowchart LR
     O --> A(["Plain-English answer"])
 ```
 
-This is a learning project built layer by layer, with each layer testable in isolation. The `4 → 2` loop is the retry path: a failed execution feeds its error back into the next generation attempt (see [Reliability tuning](#reliability-tuning)).
+**Stack:** Python · Streamlit · SQLAlchemy · Ollama (`sqlcoder` 7B) or any OpenAI-compatible API · pytest
+
+The `4 → 2` loop is the retry path: a failed execution feeds its error back into the next generation
+attempt (see [Reliability tuning](#reliability-tuning)).
+
+### What's actually interesting here
+
+Getting an LLM to emit SQL is the easy part. The engineering is in what surrounds it:
+
+- **A safety layer that assumes the model is wrong** — read-only enforcement, validation against the
+  introspected schema, an injected row limit, and a Postgres `statement_timeout`. Sized to the real
+  threat model (a model mistranslating English) rather than an adversarial attacker.
+- **A backend abstraction that survives a model swap** — `LLMBackend` hides two genuinely different
+  prompt shapes (raw-completion `sqlcoder` vs. chat-style instruct models) behind one interface, so
+  switching costs one line in `.env` and no pipeline changes.
+- **A retry loop that can actually escape** — temperature escalates on each attempt, because a fixed
+  temperature makes a deterministic model repeat its wrong answer four times.
+- **Tests that run with no model at all** — `FakeLLMBackend` scripts "wrong query, then a corrected
+  one" so the full generate → check → execute → retry → explain path is exercised deterministically,
+  offline, in CI.
+- **Limitations stated rather than hidden** — see [Known limitations](#known-limitations); the Spider
+  eval is described as a sanity check, not a leaderboard number, because that is what it is.
 
 ## Architecture
 
